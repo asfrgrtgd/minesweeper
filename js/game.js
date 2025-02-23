@@ -10,6 +10,7 @@ class Minesweeper {
         this.players = new Map();
         this.totalRevealed = 0;
         this.activeTab = 'chat';
+        this.boundSocketHandlers = new Map(); // Socket.ioイベントハンドラーを追跡
 
         // DOM要素
         this.joinSection = document.getElementById('join-section');
@@ -249,24 +250,29 @@ class Minesweeper {
             this.playerNameInput.focus();
         }
     }
+setupSocketListeners() {
+    // イベントハンドラーを保存して追跡
+    const addHandler = (event, handler) => {
+        this.boundSocketHandlers.set(event, handler);
+        this.socket.on(event, handler);
+    };
 
-    setupSocketListeners() {
-        // ルーム関連のイベント
-        this.socket.on('roomCreated', ({ roomCode }) => {
-            this.enterRoom(roomCode, true);
-        });
+    // ルーム関連のイベント
+    addHandler('roomCreated', ({ roomCode }) => {
+        this.enterRoom(roomCode, true);
+    });
 
-        this.socket.on('roomJoined', ({ roomCode }) => {
-            this.enterRoom(roomCode, false);
-        });
+    addHandler('roomJoined', ({ roomCode }) => {
+        this.enterRoom(roomCode, false);
+    });
 
-        this.socket.on('roomError', (error) => {
-            alert(error);
-        });
+    addHandler('roomError', (error) => {
+        alert(error);
+    });
 
-        // ゲーム状態の同期
-        this.socket.on('gameState', (state) => {
-            console.log('Received game state:', {
+    // ゲーム状態の同期
+    addHandler('gameState', (state) => {
+        console.log('Received game state:', {
                 gameStarted: state.gameStarted,
                 playerCount: state.players.length,
                 hasCurrentGame: !!state.currentGame
@@ -452,11 +458,24 @@ class Minesweeper {
         this.cols = cols;
         this.mines = mines;
         this.board = [];
-        this.boardElement.innerHTML = '';
+        
+        // 既存のボードのイベントリスナーを削除
+        const oldCells = this.boardElement.children;
+        for (let i = oldCells.length - 1; i >= 0; i--) {
+            const cell = oldCells[i];
+            cell.removeEventListener('click', cell._clickHandler);
+            cell.removeEventListener('contextmenu', cell._contextHandler);
+            cell.remove();
+        }
+        
         this.boardElement.style.gridTemplateColumns = `repeat(${cols}, 30px)`;
+
+        // セルの参照を保持する配列
+        this.cellElements = [];
 
         for (let i = 0; i < rows; i++) {
             this.board[i] = [];
+            this.cellElements[i] = [];
             for (let j = 0; j < cols; j++) {
                 this.board[i][j] = {
                     mine: false,
@@ -469,9 +488,15 @@ class Minesweeper {
                 cell.className = 'cell';
                 cell.dataset.row = i;
                 cell.dataset.col = j;
-                cell.addEventListener('click', (e) => this.handleClick(e, i, j));
-                cell.addEventListener('contextmenu', (e) => this.handleRightClick(e, i, j));
+                
+                // イベントハンドラーを保存
+                cell._clickHandler = (e) => this.handleClick(e, i, j);
+                cell._contextHandler = (e) => this.handleRightClick(e, i, j);
+                
+                cell.addEventListener('click', cell._clickHandler);
+                cell.addEventListener('contextmenu', cell._contextHandler);
                 this.boardElement.appendChild(cell);
+                this.cellElements[i][j] = cell;
             }
         }
 
@@ -496,28 +521,49 @@ class Minesweeper {
     }
 
     updateCell(row, col, player) {
-        const cell = this.boardElement.children[row * this.cols + col];
+        const cell = this.cellElements[row][col];
         const cellData = this.board[row][col];
         
-        cell.className = 'cell';
+        // クラスリストを一度に更新するための配列
+        const classList = ['cell'];
+        
         if (cellData.revealed) {
-            cell.classList.add('revealed');
+            classList.push('revealed');
             if (cellData.mine) {
-                cell.classList.add('mine');
-                cell.innerHTML = '💣';
+                classList.push('mine');
+                // requestAnimationFrameを使用してDOM更新を最適化
+                requestAnimationFrame(() => {
+                    cell.innerHTML = '💣';
+                    if (player) {
+                        cell.style.borderBottom = `3px solid ${player.color}`;
+                    }
+                });
             } else if (cellData.count > 0) {
-                cell.textContent = cellData.count;
-            }
-            
-            if (player) {
-                cell.style.borderBottom = `3px solid ${player.color}`;
+                requestAnimationFrame(() => {
+                    cell.textContent = cellData.count;
+                    if (player) {
+                        cell.style.borderBottom = `3px solid ${player.color}`;
+                    }
+                });
+            } else if (player) {
+                requestAnimationFrame(() => {
+                    cell.style.borderBottom = `3px solid ${player.color}`;
+                });
             }
         } else if (cellData.flagged) {
-            cell.classList.add('flagged');
-            cell.innerHTML = '🚩';
+            classList.push('flagged');
+            requestAnimationFrame(() => {
+                cell.innerHTML = '🚩';
+            });
         } else {
-            cell.textContent = '';
+            requestAnimationFrame(() => {
+                cell.textContent = '';
+                cell.style.borderBottom = '';
+            });
         }
+        
+        // クラスリストを一度に更新
+        cell.className = classList.join(' ');
     }
 
     updateMinesLeft() {
@@ -536,80 +582,34 @@ class Minesweeper {
             return;
         }
 
-        // デバッグ出力
-        console.log('Updating player list with:', {
-            currentPlayerId: this.playerId,
-            isHost: this.isHost,
-            playerCount: this.players.size,
-            players: Array.from(this.players.entries()).map(([id, p]) => ({
-                id,
-                name: p.name,
-                isHost: p.isHost,
-                color: p.color
-            }))
-        });
-
-        // プレイヤーリストをクリア
-        this.playerListElement.innerHTML = '';
-
-        // プレイヤー情報を表示
+        // DocumentFragmentを使用してDOM操作を最適化
+        const fragment = document.createDocumentFragment();
+        
         Array.from(this.players.values()).forEach(player => {
-            // プレイヤー要素の作成
             const playerDiv = document.createElement('div');
-            playerDiv.className = 'player-item';
+            playerDiv.className = `player-item${player.id === this.playerId ? ' current-player' : ''}`;
+
+            // プレイヤー情報の作成（テンプレートリテラルを使用して最適化）
+            const playerHTML = `
+                <div class="player-info">
+                    <span class="player-color" style="background-color: ${player.color}"></span>
+                    <span class="player-name">${player.name}${player.id === this.playerId ? ' (あなた)' : ''}</span>
+                </div>
+                <span class="player-status ${player.isHost || (player.id === this.playerId && this.isHost) ? 'host' : this.gameStarted ? 'playing' : 'waiting'}">
+                    ${player.isHost || (player.id === this.playerId && this.isHost) ? 'ホスト' : this.gameStarted ? 'プレイ中' : '待機中'}
+                </span>
+            `;
             
-            if (player.id === this.playerId) {
-                playerDiv.classList.add('current-player');
-            }
-
-            // プレイヤー情報の作成
-            const playerInfo = document.createElement('div');
-            playerInfo.className = 'player-info';
-
-            // カラードット
-            const colorDot = document.createElement('span');
-            colorDot.className = 'player-color';
-            colorDot.style.backgroundColor = player.color;
-
-            // プレイヤー名
-            const nameSpan = document.createElement('span');
-            nameSpan.className = 'player-name';
-            nameSpan.textContent = player.name;
-            if (player.id === this.playerId) {
-                nameSpan.textContent += ' (あなた)';
-            }
-
-            playerInfo.appendChild(colorDot);
-            playerInfo.appendChild(nameSpan);
-
-            // ステータス表示
-            const statusSpan = document.createElement('span');
-            statusSpan.className = 'player-status';
-
-            if (player.isHost || (player.id === this.playerId && this.isHost)) {
-                statusSpan.classList.add('host');
-                statusSpan.textContent = 'ホスト';
-            } else if (this.gameStarted) {
-                statusSpan.classList.add('playing');
-                statusSpan.textContent = 'プレイ中';
-            } else {
-                statusSpan.classList.add('waiting');
-                statusSpan.textContent = '待機中';
-            }
-
-            // 要素を組み立て
-            playerDiv.appendChild(playerInfo);
-            playerDiv.appendChild(statusSpan);
-            this.playerListElement.appendChild(playerDiv);
+            playerDiv.innerHTML = playerHTML;
+            fragment.appendChild(playerDiv);
         });
 
-        // プレイヤー数を更新
-        this.updatePlayerCount();
-
-        // スタイルの再適用を強制
-        this.playerListElement.style.display = 'none';
-        this.playerListElement.offsetHeight; // reflow
-        this.playerListElement.style.display = '';
+        // バッチ更新
+        requestAnimationFrame(() => {
+            this.playerListElement.innerHTML = '';
+            this.playerListElement.appendChild(fragment);
+            this.updatePlayerCount();
+        });
     }
 
     updatePlayerCount() {
@@ -643,9 +643,47 @@ class Minesweeper {
         this.chatMessages.appendChild(messageDiv);
         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
     }
+
+    dispose() {
+        // Socket.ioのイベントリスナーを削除
+        this.boundSocketHandlers.forEach((handler, event) => {
+            this.socket.off(event, handler);
+        });
+        this.boundSocketHandlers.clear();
+
+        // セルのイベントリスナーを削除
+        if (this.cellElements) {
+            this.cellElements.forEach(row => {
+                row.forEach(cell => {
+                    if (cell._clickHandler) cell.removeEventListener('click', cell._clickHandler);
+                    if (cell._contextHandler) cell.removeEventListener('contextmenu', cell._contextHandler);
+                });
+            });
+        }
+
+        // Socket.io接続を切断
+        if (this.socket) {
+            this.socket.disconnect();
+        }
+
+        // DOM参照をクリア
+        this.boardElement = null;
+        this.playerListElement = null;
+        this.chatMessages = null;
+        this.gameLogMessages = null;
+        this.cellElements = null;
+    }
 }
 
-// ゲームの初期化
+// ゲームの初期化とクリーンアップ
+let game;
 window.addEventListener('load', () => {
-    new Minesweeper();
+    game = new Minesweeper();
+});
+
+window.addEventListener('unload', () => {
+    if (game) {
+        game.dispose();
+        game = null;
+    }
 });

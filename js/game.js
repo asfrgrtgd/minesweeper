@@ -10,7 +10,9 @@ class Minesweeper {
         this.players = new Map();
         this.totalRevealed = 0;
         this.activeTab = 'chat';
-        this.boundSocketHandlers = new Map(); // Socket.ioイベントハンドラーを追跡
+        this.boundSocketHandlers = new Map();
+        this.timerInterval = null;
+        this.timerValue = 0;
 
         // DOM要素
         this.joinSection = document.getElementById('join-section');
@@ -20,6 +22,10 @@ class Minesweeper {
         this.newGameButton = document.getElementById('new-game');
         this.timerElement = document.getElementById('timer');
         this.minesLeftElement = document.getElementById('mines-left');
+        this.overlay = document.getElementById('game-overlay');
+        this.overlayIcon = document.getElementById('overlay-icon');
+        this.overlayMessage = document.getElementById('overlay-message');
+        this.overlayCloseButton = document.getElementById('overlay-close');
         this.playerListElement = document.querySelector('#player-list .players');
         this.chatMessages = document.getElementById('chat-messages');
         this.gameLogMessages = document.getElementById('game-log-messages');
@@ -62,6 +68,11 @@ class Minesweeper {
                 const tabName = button.dataset.tab;
                 this.switchTab(tabName);
             });
+        });
+
+        // オーバーレイを閉じる
+        this.overlayCloseButton.addEventListener('click', () => {
+            this.hideOverlay();
         });
 
         // ルーム作成
@@ -137,6 +148,30 @@ class Minesweeper {
         });
 
         this.activeTab = tabName;
+    }
+
+    startTimer() {
+        this.stopTimer(); // 既存のタイマーがあれば停止
+        this.timerValue = 0;
+        this.updateTimerDisplay();
+        this.timerInterval = setInterval(() => {
+            this.timerValue++;
+            this.updateTimerDisplay();
+        }, 1000);
+    }
+
+    stopTimer() {
+        if (this.timerInterval) {
+            clearInterval(this.timerInterval);
+            this.timerInterval = null;
+        }
+    }
+
+    updateTimerDisplay() {
+        const minutes = Math.floor(this.timerValue / 60);
+        const seconds = this.timerValue % 60;
+        this.timerElement.textContent = 
+            `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     }
 
     createRoom() {
@@ -226,53 +261,26 @@ class Minesweeper {
         return colors[index % colors.length];
     }
 
-    joinGame() {
-        const name = this.playerNameInput.value.trim();
-        if (name) {
-            this.playerName = name;
-            this.socket.emit('join', name);
-            this.playerId = this.socket.id;
-            
-            // 参加後にコントロールを有効化
-            this.playerNameInput.disabled = true;
-            this.joinGameButton.disabled = true;
-            this.difficultySelect.disabled = false;
-            this.newGameButton.disabled = false;
-            this.chatInput.disabled = false;
-            this.sendMessageButton.disabled = false;
+    setupSocketListeners() {
+        const addHandler = (event, handler) => {
+            this.boundSocketHandlers.set(event, handler);
+            this.socket.on(event, handler);
+        };
 
-            this.addChatMessage({
-                system: true,
-                message: 'ゲームに参加しました'
-            });
-        } else {
-            alert('プレイヤー名を入力してください');
-            this.playerNameInput.focus();
-        }
-    }
-setupSocketListeners() {
-    // イベントハンドラーを保存して追跡
-    const addHandler = (event, handler) => {
-        this.boundSocketHandlers.set(event, handler);
-        this.socket.on(event, handler);
-    };
+        addHandler('roomCreated', ({ roomCode }) => {
+            this.enterRoom(roomCode, true);
+        });
 
-    // ルーム関連のイベント
-    addHandler('roomCreated', ({ roomCode }) => {
-        this.enterRoom(roomCode, true);
-    });
+        addHandler('roomJoined', ({ roomCode }) => {
+            this.enterRoom(roomCode, false);
+        });
 
-    addHandler('roomJoined', ({ roomCode }) => {
-        this.enterRoom(roomCode, false);
-    });
+        addHandler('roomError', (error) => {
+            alert(error);
+        });
 
-    addHandler('roomError', (error) => {
-        alert(error);
-    });
-
-    // ゲーム状態の同期
-    addHandler('gameState', (state) => {
-        console.log('Received game state:', {
+        addHandler('gameState', (state) => {
+            console.log('Received game state:', {
                 gameStarted: state.gameStarted,
                 playerCount: state.players.length,
                 hasCurrentGame: !!state.currentGame
@@ -292,15 +300,12 @@ setupSocketListeners() {
             state.players.forEach(p => {
                 const player = { ...p };
                 
-                // 自分自身の場合
                 if (p.id === this.playerId) {
                     player.isHost = this.isHost;
                 }
-                // 既存のホストの場合
                 else if (currentHost && p.id === currentHost.id) {
                     player.isHost = true;
                 }
-                // 新規参加で他にホストがいない場合
                 else if (!currentHost && oldPlayers.size === 0 && this.players.size === 0) {
                     player.isHost = true;
                     currentHost = player;
@@ -309,22 +314,10 @@ setupSocketListeners() {
                 this.players.set(p.id, player);
             });
             
-            console.log('Updated players:', {
-                playerCount: this.players.size,
-                players: Array.from(this.players.entries()).map(([id, p]) => ({
-                    id,
-                    name: p.name,
-                    isHost: p.isHost,
-                    isCurrent: id === this.playerId
-                }))
-            });
-            
-            // 途中参加時のボード状態の同期
             if (state.currentGame) {
                 this.initializeBoard(state.currentGame);
                 this.gameStarted = true;
                 
-                // 既存のセル状態を適用
                 if (state.currentGame.board) {
                     for (let i = 0; i < this.rows; i++) {
                         for (let j = 0; j < this.cols; j++) {
@@ -335,33 +328,24 @@ setupSocketListeners() {
                             }
                         }
                     }
-
-                    console.log('Board state synced:', {
-                        rows: this.rows,
-                        cols: this.cols,
-                        totalRevealed: state.currentGame.totalRevealed
-                    });
                 }
                 
-                // 進捗状況の更新
                 this.totalRevealed = state.currentGame.totalRevealed || 0;
                 this.updateMinesLeft();
             }
 
-            // UI更新
             this.updatePlayerList();
             this.updateRoomStatus(state);
         });
 
-        // プレイヤーの参加/退出
-        this.socket.on('playerJoined', (player) => {
+        addHandler('playerJoined', (player) => {
             this.players.set(player.id, player);
             this.updatePlayerList();
             this.updatePlayerCount();
             this.addGameLog('システム', `${player.name} が参加しました`);
         });
 
-        this.socket.on('playerLeft', (playerId) => {
+        addHandler('playerLeft', (playerId) => {
             const player = this.players.get(playerId);
             if (player) {
                 this.addGameLog('システム', `${player.name} が退出しました`);
@@ -369,7 +353,6 @@ setupSocketListeners() {
                 this.updatePlayerList();
                 this.updatePlayerCount();
 
-                // ホストが退出した場合、新しいホストを設定
                 if (player.isHost && this.players.size > 0) {
                     const newHost = Array.from(this.players.values())[0];
                     if (newHost.id === this.playerId) {
@@ -382,16 +365,16 @@ setupSocketListeners() {
             }
         });
 
-        // ゲームプレイ関連のイベント
-        this.socket.on('gameStarted', (config) => {
+        addHandler('gameStarted', (config) => {
             this.gameStarted = true;
             this.totalRevealed = 0;
             this.initializeBoard(config);
             this.addGameLog('システム', '新しいゲームが開始されました！');
             this.gameStatus.textContent = 'プレイ中';
+            this.startTimer();
         });
 
-        this.socket.on('cellsRevealed', ({ cells, playerId }) => {
+        addHandler('cellsRevealed', ({ cells, playerId }) => {
             const player = this.players.get(playerId);
             cells.forEach(({ row, col, cell }) => {
                 if (!this.board[row][col].revealed && cell.revealed) {
@@ -401,14 +384,13 @@ setupSocketListeners() {
                 this.updateCell(row, col, player);
             });
 
-            // 協力プレイの進捗を表示
             const totalCells = this.rows * this.cols;
             const safeCells = totalCells - this.mines;
             const progress = Math.floor((this.totalRevealed / safeCells) * 100);
             this.addGameLog('進捗', `${progress}% (${this.totalRevealed}/${safeCells}マス)`);
         });
 
-        this.socket.on('flagToggled', ({ row, col, flagged, playerId }) => {
+        addHandler('flagToggled', ({ row, col, flagged, playerId }) => {
             const player = this.players.get(playerId);
             this.board[row][col].flagged = flagged;
             this.updateCell(row, col, player);
@@ -419,38 +401,22 @@ setupSocketListeners() {
             );
         });
 
-        this.socket.on('gameOver', ({ won }) => {
+        addHandler('gameOver', ({ won }) => {
             this.gameStarted = false;
             this.gameStatus.textContent = '待機中';
+            this.stopTimer();
             
             const message = won ?
                 'チーム勝利！おめでとうございます！🎉' :
                 'ゲームオーバー... みんなで次は頑張ろう！';
             
             this.addGameLog('システム', message);
-            setTimeout(() => alert(message), 100);
+            this.showOverlay(won);
         });
 
-        // チャットメッセージ
-        this.socket.on('chatMessage', (data) => {
+        addHandler('chatMessage', (data) => {
             this.addChatMessage(data);
         });
-    }
-
-    updateRoomStatus(state) {
-        this.playerCount.textContent = `${this.players.size}/8`;
-        this.gameStatus.textContent = this.gameStarted ? 'プレイ中' : '待機中';
-    }
-
-    addGameLog(type, message) {
-        const logDiv = document.createElement('div');
-        logDiv.className = `log-message ${type.toLowerCase()}`;
-        
-        const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        logDiv.innerHTML = `<span class="message-time">${time}</span> ${message}`;
-        
-        this.gameLogMessages.appendChild(logDiv);
-        this.gameLogMessages.scrollTop = this.gameLogMessages.scrollHeight;
     }
 
     initializeBoard({ rows, cols, mines }) {
@@ -459,7 +425,6 @@ setupSocketListeners() {
         this.mines = mines;
         this.board = [];
         
-        // 既存のボードのイベントリスナーを削除
         const oldCells = this.boardElement.children;
         for (let i = oldCells.length - 1; i >= 0; i--) {
             const cell = oldCells[i];
@@ -470,7 +435,6 @@ setupSocketListeners() {
         
         this.boardElement.style.gridTemplateColumns = `repeat(${cols}, 30px)`;
 
-        // セルの参照を保持する配列
         this.cellElements = [];
 
         for (let i = 0; i < rows; i++) {
@@ -489,7 +453,6 @@ setupSocketListeners() {
                 cell.dataset.row = i;
                 cell.dataset.col = j;
                 
-                // イベントハンドラーを保存
                 cell._clickHandler = (e) => this.handleClick(e, i, j);
                 cell._contextHandler = (e) => this.handleRightClick(e, i, j);
                 
@@ -524,14 +487,12 @@ setupSocketListeners() {
         const cell = this.cellElements[row][col];
         const cellData = this.board[row][col];
         
-        // クラスリストを一度に更新するための配列
         const classList = ['cell'];
         
         if (cellData.revealed) {
             classList.push('revealed');
             if (cellData.mine) {
                 classList.push('mine');
-                // requestAnimationFrameを使用してDOM更新を最適化
                 requestAnimationFrame(() => {
                     cell.innerHTML = '💣';
                     if (player) {
@@ -562,7 +523,6 @@ setupSocketListeners() {
             });
         }
         
-        // クラスリストを一度に更新
         cell.className = classList.join(' ');
     }
 
@@ -576,20 +536,23 @@ setupSocketListeners() {
         this.minesLeftElement.textContent = String(this.mines - flaggedCount).padStart(3, '0');
     }
 
+    updateRoomStatus(state) {
+        this.playerCount.textContent = `${this.players.size}/8`;
+        this.gameStatus.textContent = this.gameStarted ? 'プレイ中' : '待機中';
+    }
+
     updatePlayerList() {
         if (!this.playerListElement) {
             console.error('Player list element not found');
             return;
         }
 
-        // DocumentFragmentを使用してDOM操作を最適化
         const fragment = document.createDocumentFragment();
         
         Array.from(this.players.values()).forEach(player => {
             const playerDiv = document.createElement('div');
             playerDiv.className = `player-item${player.id === this.playerId ? ' current-player' : ''}`;
 
-            // プレイヤー情報の作成（テンプレートリテラルを使用して最適化）
             const playerHTML = `
                 <div class="player-info">
                     <span class="player-color" style="background-color: ${player.color}"></span>
@@ -604,7 +567,6 @@ setupSocketListeners() {
             fragment.appendChild(playerDiv);
         });
 
-        // バッチ更新
         requestAnimationFrame(() => {
             this.playerListElement.innerHTML = '';
             this.playerListElement.appendChild(fragment);
@@ -615,6 +577,17 @@ setupSocketListeners() {
     updatePlayerCount() {
         const playerCount = this.players.size;
         this.playerCount.textContent = `${playerCount}/8`;
+    }
+
+    addGameLog(type, message) {
+        const logDiv = document.createElement('div');
+        logDiv.className = `log-message ${type.toLowerCase()}`;
+        
+        const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        logDiv.innerHTML = `<span class="message-time">${time}</span> ${message}`;
+        
+        this.gameLogMessages.appendChild(logDiv);
+        this.gameLogMessages.scrollTop = this.gameLogMessages.scrollHeight;
     }
 
     sendChatMessage() {
@@ -644,14 +617,44 @@ setupSocketListeners() {
         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
     }
 
+    showOverlay(won) {
+        this.overlay.classList.remove('success', 'fail');
+        this.overlay.classList.add(won ? 'success' : 'fail');
+        
+        this.overlayIcon.innerHTML = won ? '🎉' : '💣';
+        
+        if (won) {
+            const minutes = Math.floor(this.timerValue / 60);
+            const seconds = this.timerValue % 60;
+            const timeStr = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            this.overlayMessage.textContent = `チーム勝利！おめでとうございます！\nクリアタイム: ${timeStr}`;
+        } else {
+            this.overlayMessage.textContent = 'ゲームオーバー... みんなで次は頑張ろう！';
+        }
+        
+        requestAnimationFrame(() => {
+            this.overlay.style.display = 'flex';
+            requestAnimationFrame(() => {
+                this.overlay.classList.add('visible');
+            });
+        });
+    }
+
+    hideOverlay() {
+        this.overlay.classList.remove('visible');
+        setTimeout(() => {
+            this.overlay.style.display = 'none';
+        }, 300); // トランジションの時間と合わせる
+    }
+
     dispose() {
-        // Socket.ioのイベントリスナーを削除
+        this.stopTimer();
+        
         this.boundSocketHandlers.forEach((handler, event) => {
             this.socket.off(event, handler);
         });
         this.boundSocketHandlers.clear();
 
-        // セルのイベントリスナーを削除
         if (this.cellElements) {
             this.cellElements.forEach(row => {
                 row.forEach(cell => {
@@ -661,12 +664,10 @@ setupSocketListeners() {
             });
         }
 
-        // Socket.io接続を切断
         if (this.socket) {
             this.socket.disconnect();
         }
 
-        // DOM参照をクリア
         this.boardElement = null;
         this.playerListElement = null;
         this.chatMessages = null;
@@ -675,7 +676,6 @@ setupSocketListeners() {
     }
 }
 
-// ゲームの初期化とクリーンアップ
 let game;
 window.addEventListener('load', () => {
     game = new Minesweeper();

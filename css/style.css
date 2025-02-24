@@ -627,6 +627,64 @@ h1 {
     box-shadow: var(--shadow);
 }
 
+/* ゲームオーバー/勝利オーバーレイ */
+.game-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.game-overlay.visible {
+    opacity: 1;
+}
+
+.overlay-content {
+    background: white;
+    padding: 30px;
+    border-radius: 15px;
+    text-align: center;
+    max-width: 400px;
+    width: 90%;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    transform: translateY(20px);
+    transition: transform 0.3s ease;
+}
+
+.game-overlay.visible .overlay-content {
+    transform: translateY(0);
+}
+
+#overlay-icon {
+    font-size: 4rem;
+    margin-bottom: 20px;
+}
+
+#overlay-message {
+    font-size: 1.5rem;
+    margin-bottom: 25px;
+    color: var(--text-color);
+    white-space: pre-line;
+    line-height: 1.8;
+    text-align: center;
+}
+
+.game-overlay.success #overlay-icon {
+    color: var(--success-color);
+}
+
+.game-overlay.fail #overlay-icon {
+    color: var(--danger-color);
+}
+
 /* レスポンシブデザイン */
 @media (max-width: 1024px) {
     .game-container {

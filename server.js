@@ -17,6 +17,12 @@ app.use(express.static(__dirname));
 // ゲームの状態管理
 const rooms = new Map();
 
+// プレイヤーカラー配列（クライアント側と統一）
+const PLAYER_COLORS = [
+    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4',
+    '#FFEEAD', '#D4A5A5', '#9B59B6', '#3498DB'
+];
+
 // ランダムなルームコードを生成
 function generateRoomCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -29,6 +35,8 @@ function generateRoomCode() {
     } while (rooms.has(code));
     return code;
 }
+
+
 
 // ルーム作成
 function createRoom(hostId, hostName) {
@@ -44,7 +52,7 @@ function createRoom(hostId, hostName) {
     const hostPlayer = {
         id: hostId,
         name: hostName,
-        color: `hsl(${Math.random() * 360}, 70%, 50%)`,
+        color: PLAYER_COLORS[0], // ホストは常に最初の色
         isHost: true
     };
 
@@ -208,12 +216,19 @@ io.on('connection', (socket) => {
         socket.join(room.code);
         socket.emit('roomCreated', { roomCode: room.code });
 
-        // ルーム状態を送信
+        // ルーム状態を送信（ホスト状態を明確に設定）
+        const players = Array.from(room.players.values()).map(p => ({
+            ...p,
+            isHost: p.id === room.hostId
+        }));
+        
         socket.emit('gameState', {
-            players: Array.from(room.players.values()),
+            players,
             currentGame: null,
             gameStarted: false
         });
+        
+        console.log(`ルーム作成: ${playerName} (${socket.id}) がルーム ${room.code} を作成`);
     });
 
     // ルーム参加
@@ -237,7 +252,7 @@ io.on('connection', (socket) => {
         const player = {
             id: socket.id,
             name: name,
-            color: `hsl(${Math.random() * 360}, 70%, 50%)`,
+            color: PLAYER_COLORS[room.players.size % PLAYER_COLORS.length],
             isHost: false
         };
 
@@ -246,7 +261,7 @@ io.on('connection', (socket) => {
         socket.join(roomCode);
         socket.emit('roomJoined', { roomCode });
 
-        // 全プレイヤーの状態を確認し、同期
+        // 全プレイヤーの状態を確認し、同期（ホスト状態を明確に設定）
         const players = Array.from(room.players.values()).map(p => ({
             ...p,
             isHost: p.id === room.hostId
@@ -268,7 +283,7 @@ io.on('connection', (socket) => {
         });
 
         // 他のプレイヤーには更新された参加者リストとゲーム状態を送信
-        socket.to(roomCode).emit('gameState', {
+        io.to(roomCode).emit('gameState', {
             players,
             currentGame: room.game ? {
                 gameStarted: true,
@@ -288,6 +303,8 @@ io.on('connection', (socket) => {
 
         // 他のプレイヤーに新しいプレイヤーを通知
         socket.to(roomCode).emit('playerJoined', player);
+        
+        console.log(`プレイヤー参加: ${name} (${socket.id}) がルーム ${roomCode} に参加`);
     });
 
     // 新しいゲームの開始（ホストのみ）
@@ -306,9 +323,14 @@ io.on('connection', (socket) => {
             mines: room.game.mines
         });
 
-        // 次に完全なゲーム状態を同期
+        // 次に完全なゲーム状態を同期（ホスト状態を明確に設定）
+        const players = Array.from(room.players.values()).map(p => ({
+            ...p,
+            isHost: p.id === room.hostId
+        }));
+        
         io.to(currentRoom).emit('gameState', {
-            players: Array.from(room.players.values()),
+            players,
             currentGame: {
                 ...room.game,
                 board: room.game.board,
@@ -317,6 +339,8 @@ io.on('connection', (socket) => {
             },
             gameStarted: true
         });
+        
+        console.log(`ゲーム開始: ルーム ${currentRoom} で${difficulty}モードのゲームが開始されました`);
     });
 
     // セルを開く
@@ -353,6 +377,55 @@ io.on('connection', (socket) => {
         }
     });
 
+    // 再接続
+    socket.on('rejoinRoom', ({ roomCode, oldId }) => {
+        const room = rooms.get(roomCode);
+        if (!room) {
+            socket.emit('roomError', 'ルームが見つかりません');
+            return;
+        }
+
+        const player = room.players.get(oldId);
+        if (player) {
+            // プレイヤーの ID を更新
+            room.players.delete(oldId);
+            player.id = socket.id;
+            room.players.set(socket.id, player);
+            
+            // ホストの場合は ID を更新
+            if (room.hostId === oldId) {
+                room.hostId = socket.id;
+            }
+
+            currentRoom = roomCode;
+            socket.join(roomCode);
+
+            // ゲーム状態を再送信（ホスト状態を明確に設定）
+            const players = Array.from(room.players.values()).map(p => ({
+                ...p,
+                isHost: p.id === room.hostId
+            }));
+            
+            socket.emit('gameState', {
+                players,
+                currentGame: room.game ? {
+                    ...room.game,
+                    board: room.game.board,
+                    totalRevealed: room.game.totalRevealed,
+                    gameStarted: true,
+                    rows: room.game.rows,
+                    cols: room.game.cols,
+                    mines: room.game.mines
+                } : null,
+                gameStarted: room.game ? true : false
+            });
+
+            console.log(`プレイヤー再接続: ${oldId} → ${socket.id}`);
+        } else {
+            socket.emit('roomError', 'プレイヤー情報が見つかりません');
+        }
+    });
+
     // チャットメッセージ
     socket.on('chatMessage', (message) => {
         if (!currentRoom) return;
@@ -383,8 +456,24 @@ io.on('connection', (socket) => {
             // ホストが退出した場合、新しいホストを設定
             if (player.isHost && room.players.size > 0) {
                 const newHost = Array.from(room.players.values())[0];
-                newHost.isHost = true;
                 room.hostId = newHost.id;
+                
+                // ホスト変更を全プレイヤーに通知
+                const players = Array.from(room.players.values()).map(p => ({
+                    ...p,
+                    isHost: p.id === room.hostId
+                }));
+                
+                io.to(currentRoom).emit('gameState', {
+                    players,
+                    currentGame: room.game ? {
+                        gameStarted: true,
+                        rows: room.game.rows,
+                        cols: room.game.cols,
+                        mines: room.game.mines
+                    } : null,
+                    gameStarted: room.game ? true : false
+                });
             }
 
             // ルームが空になった場合、ルームを削除
